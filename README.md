@@ -153,3 +153,184 @@ whitepapers which CometBFT will continue to build on.
 [lint-url-v037x]: https://github.com/cometbft/cometbft/actions/workflows/lint.yml?query=branch%3Av0.37.x
 [lint-url-v038x]: https://github.com/cometbft/cometbft/actions/workflows/lint.yml?query=branch%3Av0.38.x
 [tm-core]: https://github.com/tendermint/tendermint
+
+
+
+
+
+
+---
+
+# Adaptive Blockchain History Retention
+
+This project extends the CometBFT KVStore example with a prototype for
+**adaptive block-history retention**.
+
+Instead of keeping a fixed number of recent blocks, the node dynamically
+adjusts its hot-history window `X` according to runtime resource conditions.
+
+## Core Idea
+
+```text
+System CPU %
+System RAM %
+Disk Free %
+      |
+      v
+Weighted Stress Index
+      |
+      v
+Adaptive X
+      |
+      v
+RetainHeight
+      |
+      v
+CometBFT Block Pruning
+
+The node evaluates its runtime condition every 10 blocks.
+
+Runtime Parameters
+
+The current prototype uses three system-level parameters:
+
+CPU utilization
+Memory utilization
+Available disk space
+
+The current prototype weights are:
+
+CPU      = 0.40
+Memory   = 0.20
+Disk     = 0.40
+
+These are configurable design parameters for the prototype and are intended
+to be tuned and evaluated experimentally.
+
+Disk free space is converted into disk pressure:
+
+Disk Pressure = 100 - Disk Free %
+
+The stress index is then calculated as:
+
+Stress Index =
+    0.40 × CPU Pressure
+  + 0.20 × Memory Pressure
+  + 0.40 × Disk Pressure
+
+The stress index ranges from 0 to 100.
+
+Higher stress produces a smaller target retention window.
+
+Adaptive X
+
+The prototype currently uses:
+
+Minimum X = 100 blocks
+Maximum X = 200 blocks
+
+The target window is calculated as:
+
+X = MaxX - (StressIndex / 100) × (MaxX - MinX)
+
+The result is clamped to the configured minimum and maximum.
+
+Because pruning removes old blocks permanently, the current prototype does
+not increase X during the same run after blocks have already been pruned.
+
+Example:
+
+200 → 168 → 157 → 133 → 100
+Evaluation Interval
+
+The adaptive controller evaluates the node every:
+
+10 blocks
+
+Between evaluations, the current X continues to be used to calculate
+RetainHeight.
+
+Example
+
+A runtime observation such as:
+
+CPU          = 7.26%
+Memory       = 80.00%
+Disk Free    = 49.05%
+StressIndex  = 39.28
+X            = 161
+
+causes the node to retain approximately the latest 161 blocks as its hot
+block history.
+
+Under higher CPU pressure, the stress index can increase and the adaptive
+window can decrease.
+
+Running the Modified Example
+
+Build the project:
+
+go build ./cmd/cometbft
+
+Initialize a node:
+
+.\cometbft.exe init --home .\node-adaptive
+
+Start the persistent KVStore application:
+
+.\cometbft.exe node --home .\node-adaptive --proxy_app=persistent_kvstore
+
+The node prints adaptive decisions in the log in the following format:
+
+========== ADAPTIVE-X ==========
+height=10
+cpu=...
+memory=...
+disk_free=...
+stress_index=...
+previous_x=...
+new_x=...
+Tests
+
+Adaptive policy tests:
+
+go test ./abci/example/kvstore -run TestAdaptivePolicy -v
+
+Telemetry test:
+
+go test ./abci/example/kvstore -run TestTelemetrySample -v
+Project Scope
+
+The current implementation focuses on adaptive hot block-history retention.
+
+Cold storage / archival of pruned historical blocks is considered a future
+extension. A possible future design is to archive a complete block before
+pruning it and retrieve it from cold storage when historical data is requested.
+
+
+### A couple of important things
+
+I deliberately wrote:
+
+> "prototype"
+
+and
+
+> "intended to be tuned and evaluated experimentally"
+
+for the weights.
+
+Because we **haven't yet experimentally proven that 40/20/40 are the optimal weights**. Your actual research direction is to study how the parameters affect the node and tune the policy.
+
+Also, I used **system-level CPU/RAM/disk**, because that's what our final implementation is actually measuring.
+
+And I would **not mention Prometheus as a requirement** in the README. Our Adaptive-X controller doesn't depend on Prometheus; we used CometBFT's metrics endpoint during experimentation/validation.
+
+### One small correction
+
+The example:
+
+```text
+X = 161
+
+is an actual observation from our run, but it's better described as an example observed result, not a universal expected value.
